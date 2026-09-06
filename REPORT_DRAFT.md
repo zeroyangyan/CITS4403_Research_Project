@@ -87,7 +87,7 @@ For every figure, state the number of repetitions and whether bars show standard
 
 Suggested quantitative paragraph template:
 
-> Across 30 runs per condition, [strategy] produced the lowest mean final reach on [network]. Compared with random placement, targeted placement changed final reach from [X ± SD] to [Y ± SD]. The effect was [larger/smaller] on scale-free networks than on random or small-world networks. This [supports/does not support] our hypothesis that high-degree nodes are disproportionately important intervention targets.
+
 
 ## 5. Conclusions, interpretation and limitations
 The conclusions must be based on the observed experiment outputs. Discuss whether topology altered spread, whether targeting helped, and under what parameter ranges the effect was strongest.
