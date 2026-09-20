@@ -1,0 +1,10 @@
+network_type,intervention,mean,std,count
+random,centrality,0.624,0.06822756041366278,5
+random,none,0.9490000000000001,0.0022360679774997825,5
+random,random,0.741,0.05748912940721926,5
+scale_free,centrality,0.355,0.04138236339311715,5
+scale_free,none,0.95,0.0,5
+scale_free,random,0.612,0.06582172893505608,5
+small_world,centrality,0.633,0.13231590985214137,5
+small_world,none,0.95,0.0,5
+small_world,random,0.7,0.07322909257938413,5
