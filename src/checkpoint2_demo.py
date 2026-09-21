@@ -1,4 +1,4 @@
-"""CITS4403 Checkpoint 2 的一键演示程序。
+"""CITS4403 Checkpoint2的一键演示程序。
 
 为了方便展示，使用比最终报告更小的实验规模。
 这些快速运行参数只能展示当前进度，不能直接作为最终统计结论。
@@ -10,7 +10,7 @@ from plots import plot_main_results, plot_representative_time_series
 
 
 def main() -> None:
-    """运行小规模实验，并自动生成Checkpoint 2所需的CSV与图表。"""
+    """运行小规模实验，并自动生成Checkpoint2所需的CSV与图表。"""
     # 根据当前脚本的位置确定项目根目录，避免依赖用户从哪个目录运行程序。
     project_root = Path(__file__).resolve().parent.parent
     results_dir = project_root / "results" / "checkpoint2"
