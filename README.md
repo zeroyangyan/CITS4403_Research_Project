@@ -192,3 +192,78 @@ The main tasks are:
 - compare intervention effectiveness across network types;
 - produce final figures and tables for the report;
 - prepare the final project demonstration.
+
+---
+
+## Agent-Level Behavioural Heterogeneity
+
+The model now supports two behavioural modes so the existing homogeneous baseline can be compared with an extended model containing persistent individual differences.
+
+### Homogeneous mode (default)
+
+`model_mode="homogeneous"` preserves the original assumptions. Every ordinary agent uses:
+
+- `misinformation_prob = 0.15` as its single-exposure misinformation-adoption probability;
+- `correction_prob = 0.35` as its single-exposure correction probability.
+
+This mode is the default so existing experiments remain backwards compatible.
+
+### Heterogeneous mode
+
+`model_mode="heterogeneous"` assigns each ordinary agent two fixed attributes once during initialisation:
+
+- **misinformation susceptibility**;
+- **correction receptiveness**.
+
+Both are sampled from Beta distributions bounded to `[0, 1]`. The distributions are parameterised so their means equal the homogeneous baseline probabilities. The default concentration parameter is `20` for both attributes. Larger concentration values produce less variation between agents; smaller values produce more variation.
+
+The existing multiple-exposure rule is retained. For `k` exposures, the simulation still uses `1 - (1 - p)^k`, but `p` is now the **receiving agent's own fixed probability** in heterogeneous mode.
+
+Fact-checkers and resistant agents preserve their previous protected behaviour. Heterogeneity does not make them susceptible to misinformation.
+
+A dedicated random-number stream is used to sample agent attributes. This keeps agent attributes reproducible under a fixed configuration and seed without altering the baseline random sequence used for fact-checker selection, resistant-agent selection, or initial Believers.
+
+The full distribution assumptions and limitations are documented in [`docs/HETEROGENEITY.md`](docs/HETEROGENEITY.md).
+
+### Running the two modes
+
+Homogeneous baseline:
+
+```bash
+python src/experiments.py --experiment main --mode homogeneous --output results/main_homogeneous.csv
+```
+
+Heterogeneous model:
+
+```bash
+python src/experiments.py --experiment main --mode heterogeneous --output results/main_heterogeneous.csv
+```
+
+A small smoke experiment covering both modes and both fact-checker strategies can be run with:
+
+```bash
+python src/experiments.py --experiment smoke --n 100 --repeats 2 --output results/heterogeneity_smoke.csv
+```
+
+Experiment CSV files now include `model_mode`, the heterogeneity distribution and concentration settings, and realised means/standard deviations of the ordinary-agent behavioural attributes.
+
+### Validation tests
+
+Run the regression and invariant tests from the project root:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests cover:
+
+- preservation of an agreed homogeneous baseline trajectory;
+- reproducibility under a fixed seed;
+- probability bounds;
+- state-count conservation;
+- protected fact-checker and resistant-agent behaviour;
+- homogeneous attributes remaining equal to the original baseline probabilities.
+
+### Current limitations of heterogeneity
+
+The heterogeneous extension models stable individual differences only. It does not add dynamic networks, repeated belief after correction, delayed intervention, behavioural learning, time-varying susceptibility, or empirically calibrated demographic effects. The Beta distributions and their concentration parameters are modelling assumptions and should therefore be included in sensitivity analysis rather than treated as measured real-world values.

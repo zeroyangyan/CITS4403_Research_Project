@@ -144,7 +144,8 @@ def plot_representative_time_series(output_dir: str, n: int = 300, seed: int = 4
     plt.close()
 
 
-def main() -> None:"""读取命令行参数，根据指定CSV生成结果图。"""
+def main() -> None:
+    """读取命令行参数，根据指定CSV生成结果图。"""
     parser = argparse.ArgumentParser(description="Create project result figures")
     parser.add_argument(
         "--input",

@@ -15,24 +15,18 @@ def run_factorial_experiment(
     repeats: int = 30,
     mean_degree: int = 8,
     max_steps: int = 150,
+    model_mode: str = "homogeneous",
+    susceptibility_concentration: float = 20.0,
+    correction_concentration: float = 20.0,
 ) -> pd.DataFrame:
-    """
-    运行主要的全因子实验：
-    3种网络结构 × 3种干预策略 × 多个随机种子重复实验。
-
-    除网络结构和干预策略外，其余模型参数保持固定，
-    这样可以更清楚地比较这两个因素对结果的影响。
-    """
-    # 需要比较的三个网络结构和三种事实核查策略。
+    """Run the 3-network x 3-intervention factorial experiment."""
     networks = ["random", "small_world", "scale_free"]
     interventions = ["none", "random", "centrality"]
 
     rows = []
-    # itertools.product 会生成所有“网络×策略×重复编号”的组合。
     for network_type, intervention, rep in itertools.product(
         networks, interventions, range(repeats)
     ):
-        # 无干预组的事实核查者比例为0；其他两组均使用5%，保证预算相同。
         cfg = ModelConfig(
             n=n,
             mean_degree=mean_degree,
@@ -44,15 +38,15 @@ def run_factorial_experiment(
             resistant_fraction=0.05,
             initial_believers=5,
             max_steps=max_steps,
-            # 相同 rep 在不同实验条件中使用相同种子，便于公平比较和复现。
+            model_mode=model_mode,
+            susceptibility_concentration=susceptibility_concentration,
+            correction_concentration=correction_concentration,
             seed=1000 + rep,
         )
-        # 只保存汇总指标，不保存每一步的历史记录和网络对象。
         _, metrics, _ = run_simulation(cfg)
         metrics["repeat"] = rep
         rows.append(metrics)
 
-    # 将指标整理为表格，并保存为CSV。
     df = pd.DataFrame(rows)
     Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_csv, index=False)
@@ -64,19 +58,15 @@ def run_budget_sweep(
     n: int = 500,
     repeats: int = 30,
     network_type: str = "scale_free",
+    model_mode: str = "homogeneous",
+    susceptibility_concentration: float = 20.0,
+    correction_concentration: float = 20.0,
 ) -> pd.DataFrame:
-    """
-    独立扩展实验：改变事实核查者比例（即干预预算），
-    比较“随机选择”和“优先选择高连接用户”之间的差异。
-
-    默认在无标度网络上进行，因为高连接节点在这种网络中最明显。
-    """
-    # 分别使用1%、2.5%、5%、7.5%和10%的事实核查者。
+    """Compare random and degree-targeted fact-checking across intervention budgets."""
     fractions = [0.01, 0.025, 0.05, 0.075, 0.10]
     strategies = ["random", "centrality"]
 
     rows = []
-    # 遍历所有“预算比例×选择策略×重复编号”的组合。
     for fraction, strategy, rep in itertools.product(
         fractions, strategies, range(repeats)
     ):
@@ -91,7 +81,9 @@ def run_budget_sweep(
             resistant_fraction=0.05,
             initial_believers=5,
             max_steps=150,
-            # 使用与主实验不同的种子范围，避免混淆两组实验。
+            model_mode=model_mode,
+            susceptibility_concentration=susceptibility_concentration,
+            correction_concentration=correction_concentration,
             seed=3000 + rep,
         )
         _, metrics, _ = run_simulation(cfg)
@@ -104,24 +96,92 @@ def run_budget_sweep(
     return df
 
 
-def main():
-    """读取命令行参数，选择并运行主实验或预算扩展实验。"""
+def run_heterogeneity_smoke(
+    out_csv: str,
+    n: int = 100,
+    repeats: int = 2,
+    susceptibility_concentration: float = 20.0,
+    correction_concentration: float = 20.0,
+) -> pd.DataFrame:
+    """Small fast check covering both homogeneous and heterogeneous modes."""
+    rows = []
+    modes = ["homogeneous", "heterogeneous"]
+    strategies = ["random", "centrality"]
+
+    for mode, strategy, rep in itertools.product(modes, strategies, range(repeats)):
+        cfg = ModelConfig(
+            n=n,
+            mean_degree=8,
+            network_type="scale_free",
+            intervention=strategy,
+            fact_checker_fraction=0.05,
+            misinformation_prob=0.15,
+            correction_prob=0.35,
+            resistant_fraction=0.05,
+            initial_believers=5,
+            max_steps=60,
+            model_mode=mode,
+            susceptibility_concentration=susceptibility_concentration,
+            correction_concentration=correction_concentration,
+            seed=9000 + rep,
+        )
+        _, metrics, _ = run_simulation(cfg)
+        metrics["repeat"] = rep
+        rows.append(metrics)
+
+    df = pd.DataFrame(rows)
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+    return df
+
+
+def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--experiment", choices=["main", "budget"], default="main")
+    parser.add_argument("--experiment", choices=["main", "budget", "smoke"], default="main")
     parser.add_argument("--n", type=int, default=500)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--output", default="../results/main_experiment.csv")
+    parser.add_argument(
+        "--mode",
+        choices=["homogeneous", "heterogeneous"],
+        default="homogeneous",
+        help="Behavioural probability mode for main/budget experiments.",
+    )
+    parser.add_argument("--susceptibility-concentration", type=float, default=20.0)
+    parser.add_argument("--correction-concentration", type=float, default=20.0)
     args = parser.parse_args()
 
-    # 根据实验的值调用相应的实验函数。
     if args.experiment == "main":
-        df = run_factorial_experiment(args.output, n=args.n, repeats=args.repeats)
+        df = run_factorial_experiment(
+            args.output,
+            n=args.n,
+            repeats=args.repeats,
+            model_mode=args.mode,
+            susceptibility_concentration=args.susceptibility_concentration,
+            correction_concentration=args.correction_concentration,
+        )
+    elif args.experiment == "budget":
+        df = run_budget_sweep(
+            args.output,
+            n=args.n,
+            repeats=args.repeats,
+            model_mode=args.mode,
+            susceptibility_concentration=args.susceptibility_concentration,
+            correction_concentration=args.correction_concentration,
+        )
     else:
-        df = run_budget_sweep(args.output, n=args.n, repeats=args.repeats)
+        df = run_heterogeneity_smoke(
+            args.output,
+            n=args.n,
+            repeats=args.repeats,
+            susceptibility_concentration=args.susceptibility_concentration,
+            correction_concentration=args.correction_concentration,
+        )
 
-    
-    print(df.groupby(["network_type", "intervention"])["final_reach"]
-          .agg(["mean", "std", "count"]))# 在终端显示每组最终传播范围的平均值、标准差和实验次数。
+    print(
+        df.groupby(["model_mode", "network_type", "intervention"])["final_reach"]
+        .agg(["mean", "std", "count"])
+    )
 
 
 if __name__ == "__main__":
