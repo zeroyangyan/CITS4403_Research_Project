@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import itertools
 import json
+import hashlib
 import platform
-import subprocess
 import sys
+import subprocess
 from pathlib import Path
 
 import networkx as nx
@@ -16,58 +16,82 @@ import pandas as pd
 from model import ModelConfig, run_simulation
 
 
-NETWORKS = ["random", "small_world", "scale_free"]
-INTERVENTIONS = ["none", "random", "centrality"]
-LEVELS = ["homogeneous", "low", "high"]
+def check_output(out_csv: str) -> None:
+    path = Path(out_csv)
+    metadata_path = path.with_suffix(".metadata.json")
+
+    if path.exists() or metadata_path.exists():
+        raise FileExistsError(
+            "Choose a new output filename; "
+            "existing results are protected."
+        )
 
 
-def environment_record():
-    source_dir = Path(__file__).resolve().parent
+def save_metadata(
+    out_csv: str,
+    df: pd.DataFrame,
+) -> None:
+    source = Path(__file__).resolve().parent
 
     try:
         commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            cwd=source_dir,
+            cwd=source,
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
 
-        git_dirty = bool(subprocess.check_output(
-            ["git", "status", "--porcelain"],
-            cwd=source_dir,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip())
+        dirty = bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                cwd=source,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+        )
+
     except (OSError, subprocess.CalledProcessError):
         commit = None
-        git_dirty = None
+        dirty = None
 
-    hashes = {}
-    for name in (
-        "model.py", "experiments.py",
-        "plots.py", "checkpoint2_demo.py"
-    ):
-        path = source_dir / name
-        if path.exists():
-            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    source_hashes = {
+        path.name: hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in sorted(source.glob("*.py"))
+    }
 
-    return {
+    data = {
         "command": sys.argv,
         "python": sys.version,
         "platform": platform.platform(),
-        "networkx": nx.__version__,
-        "numpy": np.__version__,
-        "pandas": pd.__version__,
-        "source_commit": commit,
-        "git_dirty": git_dirty,
-        "source_sha256": hashes,
-        "comparison_design": "independent runs; no paired inference",
-        "heterogeneity_strengths": {
-            "homogeneous": 0.0,
-            "low": 0.25,
-            "high": 0.90,
+        "versions": {
+            "numpy": np.__version__,
+            "networkx": nx.__version__,
+            "pandas": pd.__version__,
         },
+        "source_commit": commit,
+        "git_dirty": dirty,
+        "source_sha256": source_hashes,
+        "initialisation_protocol":
+            "independent_eligible_sampling_v1",
+        "runs": len(df),
+        "note": (
+            "Strategies share the graph within each network "
+            "replicate. Initial resistant agents and believers "
+            "are independently sampled from eligible nodes. "
+            "Initial states are not exactly matched."
+        ),
     }
+
+    metadata_path = Path(out_csv).with_suffix(
+        ".metadata.json"
+    )
+
+    with metadata_path.open(
+        "x", encoding="utf-8"
+    ) as file:
+        json.dump(data, file, indent=2)
 
 
 def run_factorial_experiment(
@@ -77,93 +101,184 @@ def run_factorial_experiment(
     mean_degree: int = 8,
     max_steps: int = 150,
 ) -> pd.DataFrame:
+    """
+    3种网络 × 3种策略 × repeats次重复。
+
+    同一网络类型和重复编号下，三种策略使用相同网络。
+    初始状态独立抽样，不声称完全匹配。
+    """
     if repeats < 1:
         raise ValueError("repeats must be positive")
 
-    output = Path(out_csv)
-    metadata_path = output.with_suffix(".metadata.json")
+    check_output(out_csv)
 
-    if output.exists() or metadata_path.exists():
-        raise FileExistsError(
-            "Output already exists. Choose a new output filename."
-        )
-
-    output.parent.mkdir(parents=True, exist_ok=True)
+    networks = [
+        "random",
+        "small_world",
+        "scale_free",
+    ]
+    interventions = [
+        "none",
+        "random",
+        "centrality",
+    ]
 
     rows = []
-    total = len(NETWORKS) * len(INTERVENTIONS) * len(LEVELS) * repeats
 
-    combinations = itertools.product(
-        NETWORKS, LEVELS, INTERVENTIONS, range(repeats)
-    )
-
-    for run_id, (network, level, strategy, rep) in enumerate(combinations):
+    for network_type, rep, intervention in itertools.product(
+        networks,
+        range(repeats),
+        interventions,
+    ):
         cfg = ModelConfig(
             n=n,
             mean_degree=mean_degree,
-            network_type=network,
-            intervention=strategy,
-            heterogeneity=level,
-            fact_checker_fraction=0.0 if strategy == "none" else 0.05,
+            network_type=network_type,
+            intervention=intervention,
+            fact_checker_fraction=(
+                0.0 if intervention == "none" else 0.05
+            ),
+            misinformation_prob=0.15,
+            correction_prob=0.35,
+            resistant_fraction=0.05,
+            initial_believers=5,
             max_steps=max_steps,
-            seed=1000 + run_id,
+            # 同一重复编号共享基础种子。
+            # model.py 会按用途和策略派生独立随机流。
+            seed=1000 + rep,
         )
 
         _, metrics, _ = run_simulation(cfg)
         metrics["repeat"] = rep
-        metrics["run_id"] = run_id
         rows.append(metrics)
-
-        if (run_id + 1) % 30 == 0 or run_id + 1 == total:
-            print(f"Completed {run_id + 1}/{total}", flush=True)
 
     df = pd.DataFrame(rows)
 
-    # mode="x" 防止覆盖已有文件。
-    df.to_csv(output, index=False, mode="x")
+    Path(out_csv).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    metadata = environment_record()
-    metadata["experiment"] = {
-        "n": n,
-        "repeats": repeats,
-        "mean_degree": mean_degree,
-        "max_steps": max_steps,
-        "networks": NETWORKS,
-        "interventions": INTERVENTIONS,
-        "heterogeneity_levels": LEVELS,
-        "total_runs": total,
-        "seed_start": 1000,
-        "seed_end": 1000 + total - 1,
-    }
+    df.to_csv(
+        out_csv,
+        index=False,
+        mode="x",
+    )
 
-    with metadata_path.open("x", encoding="utf-8") as file:
-        json.dump(metadata, file, indent=2, ensure_ascii=False)
+    save_metadata(out_csv, df)
+    return df
 
+
+def run_budget_sweep(
+    out_csv: str,
+    n: int = 500,
+    repeats: int = 30,
+    network_type: str = "scale_free",
+) -> pd.DataFrame:
+    """比较不同核查者预算下的随机与度数策略。"""
+    if repeats < 1:
+        raise ValueError("repeats must be positive")
+
+    check_output(out_csv)
+
+    fractions = [
+        0.01,
+        0.025,
+        0.05,
+        0.075,
+        0.10,
+    ]
+    strategies = [
+        "random",
+        "centrality",
+    ]
+
+    rows = []
+
+    for fraction, rep, strategy in itertools.product(
+        fractions,
+        range(repeats),
+        strategies,
+    ):
+        cfg = ModelConfig(
+            n=n,
+            mean_degree=8,
+            network_type=network_type,
+            intervention=strategy,
+            fact_checker_fraction=fraction,
+            misinformation_prob=0.15,
+            correction_prob=0.35,
+            resistant_fraction=0.05,
+            initial_believers=5,
+            max_steps=150,
+            seed=3000 + rep,
+        )
+
+        _, metrics, _ = run_simulation(cfg)
+        metrics["repeat"] = rep
+        rows.append(metrics)
+
+    df = pd.DataFrame(rows)
+
+    Path(out_csv).parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    df.to_csv(
+        out_csv,
+        index=False,
+        mode="x",
+    )
+
+    save_metadata(out_csv, df)
     return df
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, default=500)
-    parser.add_argument("--repeats", type=int, default=30)
-    parser.add_argument("--max-steps", type=int, default=150)
+
+    parser.add_argument(
+        "--experiment",
+        choices=["main", "budget"],
+        default="main",
+    )
+    parser.add_argument(
+        "--n",
+        type=int,
+        default=500,
+    )
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        default=30,
+    )
     parser.add_argument(
         "--output",
-        default="results/heterogeneity_experiment.csv"
+        default="../results/issue2_main_experiment.csv",
     )
+
     args = parser.parse_args()
 
-    df = run_factorial_experiment(
-        args.output,
-        n=args.n,
-        repeats=args.repeats,
-        max_steps=args.max_steps,
-    )
+    if args.experiment == "main":
+        df = run_factorial_experiment(
+            args.output,
+            n=args.n,
+            repeats=args.repeats,
+        )
+    else:
+        df = run_budget_sweep(
+            args.output,
+            n=args.n,
+            repeats=args.repeats,
+        )
 
     print(
         df.groupby(
-            ["network_type", "heterogeneity", "intervention"]
-        )["final_reach"].agg(["mean", "std", "count"]).round(4)
+            ["network_type", "intervention"]
+        )["final_reach"].agg(
+            ["mean", "std", "count"]
+        )
     )
 
 
