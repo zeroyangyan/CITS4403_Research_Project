@@ -185,8 +185,9 @@ def plot_main_results(csv_path, output_dir):
         plt.close(fig)
 
 
-def main():
-    parser = argparse.ArgumentParser()
+def main() -> None:
+    """Read command-line arguments and generate figures from the results CSV."""
+    parser = argparse.ArgumentParser(description="Create project result figures")
     parser.add_argument(
         "--input",
         default="../results/combined_experiment.csv",

@@ -14,9 +14,15 @@ BELIEVER = "Believer"
 CORRECTED = "Corrected"
 RESISTANT = "Resistant"
 
+ORDINARY_ROLE = "ordinary"
+FACT_CHECKER_ROLE = "fact_checker"
+RESISTANT_ROLE = "resistant"
+
 
 @dataclass
 class ModelConfig:
+    """All parameters needed for one reproducible simulation run."""
+
     n: int = 500
     mean_degree: int = 8
     network_type: str = "small_world"
@@ -30,8 +36,18 @@ class ModelConfig:
     fact_checker_fraction: float = 0.05
     initial_believers: int = 5
 
+    # Latest-main experiment interface.
     # homogeneous | low | high
     heterogeneity: str = "homogeneous"
+
+    # Feature-branch compatibility / explicit Beta mode.
+    # None: use `heterogeneity` above.
+    # homogeneous: force baseline probabilities.
+    # heterogeneous: sample Beta-distributed probabilities once per ordinary agent.
+    model_mode: Optional[str] = None
+    heterogeneity_distribution: str = "beta"
+    susceptibility_concentration: float = 20.0
+    correction_concentration: float = 20.0
 
     corrected_share: bool = True
     max_steps: int = 150
@@ -119,6 +135,22 @@ def fingerprint(payload):
     text = json.dumps(payload, sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()
 
+    if cfg.model_mode not in (None, "homogeneous", "heterogeneous"):
+        raise ValueError(
+            "model_mode must be None, 'homogeneous', or 'heterogeneous'"
+        )
+
+    if cfg.heterogeneity_distribution != "beta":
+        raise ValueError(
+            "heterogeneity_distribution currently supports only 'beta'"
+        )
+
+    if cfg.susceptibility_concentration <= 0:
+        raise ValueError("susceptibility_concentration must be > 0")
+
+    if cfg.correction_concentration <= 0:
+        raise ValueError("correction_concentration must be > 0")
+
 
 def graph_fingerprint(G):
     return fingerprint({
@@ -166,7 +198,6 @@ def generate_network(cfg):
             largest_even -= 1
 
         k = min(k, largest_even)
-
         return nx.watts_strogatz_graph(
             cfg.n,
             k,
@@ -285,6 +316,8 @@ def _prob_at_least_one_success(p, exposures):
         return 0.0
     return 1.0 - (1.0 - p) ** exposures
 
+    Two interfaces are retained so the feature branch and latest main can merge
+    without discarding either experiment design:
 
 def run_simulation(cfg):
     _validate_config(cfg)
@@ -304,7 +337,6 @@ def run_simulation(cfg):
     )
 
     G = generate_network(cfg)
-    nodes = sorted(G.nodes())
 
     # 先为所有节点分配潜在属性，避免策略改变属性分配。
     # 核查者与抵抗者仍遵守原来的保护规则。
@@ -328,8 +360,18 @@ def run_simulation(cfg):
         selection_rng,
     )
 
-    states, initial = initialise_states(
-        G, cfg, fact_checkers, initial_rng
+    (
+        _adoption,
+        _correction,
+        effective_mode,
+        effective_distribution,
+    ) = initialise_agent_attributes(
+        G,
+        cfg,
+        fact_checkers,
+        states,
+        behaviour_rng,
+        beta_rng,
     )
 
     resistant_nodes = {
@@ -342,7 +384,7 @@ def run_simulation(cfg):
     )
 
     ever_believed = set(initial)
-    history = []
+    history: List[dict] = []
 
     def record(step):
         history.append({
@@ -370,18 +412,31 @@ def run_simulation(cfg):
 
     for step in range(1, cfg.max_steps + 1):
         believers = {
-            node for node, state in states.items()
+            node
+            for node, state in states.items()
             if state == BELIEVER
         }
 
         if not believers:
             break
 
-        misinformation_exposures = {}
-        correction_exposures = {}
+        misinformation_exposures: Dict[int, int] = {}
+        correction_exposures: Dict[int, int] = {}
 
-        for source in sorted(believers):
-            for neighbour in sorted(G.neighbors(source)):
+        # Preserve deterministic iteration in latest-main mode. In explicit
+        # feature mode, insertion order is already stable for integer node IDs.
+        source_nodes = (
+            believers
+            if cfg.model_mode is not None
+            else sorted(believers)
+        )
+        for source in source_nodes:
+            neighbours = (
+                G.neighbors(source)
+                if cfg.model_mode is not None
+                else sorted(G.neighbors(source))
+            )
+            for neighbour in neighbours:
                 if states[neighbour] == UNAWARE:
                     misinformation_exposures[neighbour] = (
                         misinformation_exposures.get(
@@ -393,12 +448,23 @@ def run_simulation(cfg):
 
         if cfg.corrected_share:
             correction_sources.update(
-                node for node, state in states.items()
+                node
+                for node, state in states.items()
                 if state == CORRECTED
             )
 
-        for source in sorted(correction_sources):
-            for neighbour in sorted(G.neighbors(source)):
+        correction_source_nodes = (
+            correction_sources
+            if cfg.model_mode is not None
+            else sorted(correction_sources)
+        )
+        for source in correction_source_nodes:
+            neighbours = (
+                G.neighbors(source)
+                if cfg.model_mode is not None
+                else sorted(G.neighbors(source))
+            )
+            for neighbour in neighbours:
                 if states[neighbour] == BELIEVER:
                     correction_exposures[neighbour] = (
                         correction_exposures.get(
@@ -406,8 +472,8 @@ def run_simulation(cfg):
                         ) + 1
                     )
 
-        to_believer = set()
-        to_corrected = set()
+        to_believer: Set[int] = set()
+        to_corrected: Set[int] = set()
 
         for node, exposures in sorted(
             misinformation_exposures.items()
@@ -445,6 +511,16 @@ def run_simulation(cfg):
     peak = max(believer_series)
     peak_index = believer_series.index(peak)
     active_at_end = believer_series[-1] > 0
+
+    for node in G.nodes():
+        G.nodes[node]["final_state"] = states[node]
+
+    ordinary_summary = _ordinary_attribute_summary(G)
+    ordinary_nodes = [
+        node
+        for node in G.nodes()
+        if G.nodes[node]["agent_role"] == ORDINARY_ROLE
+    ]
 
     metrics = {
         **asdict(cfg),

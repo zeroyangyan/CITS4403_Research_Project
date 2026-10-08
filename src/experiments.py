@@ -231,7 +231,97 @@ def run_budget_sweep(
     return save_results(out_csv, rows)
 
 
-def main():
+def run_budget_sweep(
+    out_csv: str,
+    n: int = 500,
+    repeats: int = 30,
+    network_type: str = "scale_free",
+    model_mode: str = "homogeneous",
+    susceptibility_concentration: float = 20.0,
+    correction_concentration: float = 20.0,
+) -> pd.DataFrame:
+    """Compare random and degree-targeted fact-checking across budgets."""
+    fractions = [0.01, 0.025, 0.05, 0.075, 0.10]
+    strategies = ["random", "centrality"]
+
+    rows = []
+    for fraction, strategy, rep in itertools.product(
+        fractions,
+        strategies,
+        range(repeats),
+    ):
+        cfg = ModelConfig(
+            n=n,
+            mean_degree=8,
+            network_type=network_type,
+            intervention=strategy,
+            fact_checker_fraction=fraction,
+            misinformation_prob=0.15,
+            correction_prob=0.35,
+            resistant_fraction=0.05,
+            initial_believers=5,
+            max_steps=150,
+            model_mode=model_mode,
+            susceptibility_concentration=susceptibility_concentration,
+            correction_concentration=correction_concentration,
+            seed=3000 + rep,
+        )
+        _, metrics, _ = run_simulation(cfg)
+        metrics["repeat"] = rep
+        rows.append(metrics)
+
+    df = pd.DataFrame(rows)
+    output = Path(out_csv)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output, index=False)
+    return df
+
+
+def run_heterogeneity_smoke(
+    out_csv: str,
+    n: int = 100,
+    repeats: int = 2,
+    susceptibility_concentration: float = 20.0,
+    correction_concentration: float = 20.0,
+) -> pd.DataFrame:
+    """Fast check covering homogeneous and explicit Beta-heterogeneous modes."""
+    rows = []
+    modes = ["homogeneous", "heterogeneous"]
+    strategies = ["random", "centrality"]
+
+    for mode, strategy, rep in itertools.product(
+        modes,
+        strategies,
+        range(repeats),
+    ):
+        cfg = ModelConfig(
+            n=n,
+            mean_degree=8,
+            network_type="scale_free",
+            intervention=strategy,
+            fact_checker_fraction=0.05,
+            misinformation_prob=0.15,
+            correction_prob=0.35,
+            resistant_fraction=0.05,
+            initial_believers=5,
+            max_steps=60,
+            model_mode=mode,
+            susceptibility_concentration=susceptibility_concentration,
+            correction_concentration=correction_concentration,
+            seed=9000 + rep,
+        )
+        _, metrics, _ = run_simulation(cfg)
+        metrics["repeat"] = rep
+        rows.append(metrics)
+
+    df = pd.DataFrame(rows)
+    output = Path(out_csv)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output, index=False)
+    return df
+
+
+def main() -> None:
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
