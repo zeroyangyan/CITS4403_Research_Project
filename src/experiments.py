@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import itertools
 import json
 import platform
 import subprocess
@@ -17,11 +16,63 @@ from model import ModelConfig, run_simulation
 
 
 NETWORKS = ["random", "small_world", "scale_free"]
-INTERVENTIONS = ["none", "random", "centrality"]
+STRATEGIES = ["none", "random", "centrality"]
 LEVELS = ["homogeneous", "low", "high"]
 
 
-def environment_record():
+def check_output(out_csv):
+    path = Path(out_csv)
+    if (
+        path.exists()
+        or path.with_suffix(".metadata.json").exists()
+    ):
+        raise FileExistsError(
+            "Output exists. Choose a new filename."
+        )
+
+
+def save_results(out_csv, rows):
+    df = pd.DataFrame(rows)
+
+    # 自动检查同一重复实验是否共享网络。
+    graph_counts = df.groupby(
+        ["network_type", "repeat"]
+    )["graph_sha256"].nunique()
+
+    if not graph_counts.eq(1).all():
+        raise AssertionError(
+            "Compared conditions do not share the same graph"
+        )
+
+    # 同一异质性条件中的策略必须共享用户属性。
+    attribute_counts = df.groupby(
+        ["network_type", "repeat", "heterogeneity"]
+    )["attribute_sha256"].nunique()
+
+    if not attribute_counts.eq(1).all():
+        raise AssertionError(
+            "Compared strategies do not share agent attributes"
+        )
+
+    # 有干预的两种策略必须使用相同实际预算。
+    interventions = df[df["intervention"] != "none"]
+    budget_counts = interventions.groupby(
+        [
+            "network_type",
+            "repeat",
+            "heterogeneity",
+            "fact_checker_fraction",
+        ]
+    )["num_fact_checkers"].nunique()
+
+    if not budget_counts.eq(1).all():
+        raise AssertionError(
+            "Fact-checker counts differ between strategies"
+        )
+
+    output = Path(out_csv)
+    output.parent.mkdir(parents=True, exist_ok=True)
+
     source_dir = Path(__file__).resolve().parent
 
     try:
@@ -32,129 +83,152 @@ def environment_record():
             text=True,
         ).strip()
 
-        git_dirty = bool(
-            subprocess.check_output(
-                ["git", "status", "--porcelain"],
-                cwd=source_dir,
-                stderr=subprocess.DEVNULL,
-                text=True,
-            ).strip()
-        )
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=source_dir,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip())
+
     except (OSError, subprocess.CalledProcessError):
         commit = None
-        git_dirty = None
+        dirty = None
 
-    hashes = {}
-    for name in (
-        "model.py",
-        "experiments.py",
-        "plots.py",
-        "checkpoint2_demo.py",
-    ):
-        path = source_dir / name
-        if path.exists():
-            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-
-    return {
+    metadata = {
         "command": sys.argv,
         "python": sys.version,
         "platform": platform.platform(),
-        "networkx": nx.__version__,
-        "numpy": np.__version__,
-        "pandas": pd.__version__,
+        "versions": {
+            "networkx": nx.__version__,
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+        },
         "source_commit": commit,
-        "git_dirty": git_dirty,
-        "source_sha256": hashes,
-        "comparison_design": "independent runs; no paired inference",
-        "heterogeneity_strengths": {
-            "homogeneous": 0.0,
-            "low": 0.25,
-            "high": 0.90,
+        "git_dirty": dirty,
+        "source_sha256": {
+            path.name: hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in sorted(source_dir.glob("*.py"))
         },
-        "explicit_beta_mode": {
-            "distribution": "beta",
-            "default_susceptibility_concentration": 20.0,
-            "default_correction_concentration": 20.0,
+        "initialisation_protocol":
+            "independent_eligible_sampling_v1",
+        "runs": len(df),
+        "heterogeneity": {
+            "distribution": "paired_symmetric_uniform",
+            "strengths": {
+                "homogeneous": 0.0,
+                "low": 0.25,
+                "high": 0.90,
+            },
+            "note": (
+                "Attributes are sampled once and remain fixed. "
+                "Whole-population means match configured means. "
+                "These distributions are modelling assumptions."
+            ),
         },
+        "comparison_note": (
+            "Strategies share networks and latent attributes. "
+            "Initial states are independently sampled from "
+            "eligible nodes. Runs across strategies are grouped "
+            "by network replicate, not independent graph samples."
+        ),
     }
+
+    df.to_csv(output, index=False, mode="x")
+
+    with output.with_suffix(".metadata.json").open(
+        "x", encoding="utf-8"
+    ) as file:
+        json.dump(metadata, file, indent=2)
+
+    return df
 
 
 def run_factorial_experiment(
-    out_csv: str,
-    n: int = 500,
-    repeats: int = 30,
-    mean_degree: int = 8,
-    max_steps: int = 150,
-) -> pd.DataFrame:
-    """Run the latest-main 3-network x 3-level x 3-intervention experiment."""
+    out_csv,
+    n=500,
+    repeats=30,
+    mean_degree=8,
+    max_steps=150,
+    heterogeneity_levels=None,
+):
     if repeats < 1:
         raise ValueError("repeats must be positive")
 
-    output = Path(out_csv)
-    metadata_path = output.with_suffix(".metadata.json")
-
-    if output.exists() or metadata_path.exists():
-        raise FileExistsError(
-            "Output already exists. Choose a new output filename."
-        )
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    rows = []
-    total = len(NETWORKS) * len(INTERVENTIONS) * len(LEVELS) * repeats
-
-    combinations = itertools.product(
-        NETWORKS,
-        LEVELS,
-        INTERVENTIONS,
-        range(repeats),
+    levels = (
+        LEVELS if heterogeneity_levels is None
+        else list(heterogeneity_levels)
     )
 
-    for run_id, (network, level, strategy, rep) in enumerate(combinations):
-        cfg = ModelConfig(
-            n=n,
-            mean_degree=mean_degree,
-            network_type=network,
-            intervention=strategy,
-            heterogeneity=level,
-            fact_checker_fraction=(
-                0.0 if strategy == "none" else 0.05
-            ),
-            max_steps=max_steps,
-            seed=1000 + run_id,
-        )
+    if not levels or not set(levels).issubset(LEVELS):
+        raise ValueError("Invalid heterogeneity levels")
 
-        _, metrics, _ = run_simulation(cfg)
-        metrics["repeat"] = rep
-        metrics["run_id"] = run_id
-        rows.append(metrics)
+    check_output(out_csv)
+    rows = []
+    total = len(NETWORKS) * len(levels) * len(STRATEGIES) * repeats
 
-        if (run_id + 1) % 30 == 0 or run_id + 1 == total:
-            print(f"Completed {run_id + 1}/{total}", flush=True)
+    for network_type in NETWORKS:
+        for rep in range(repeats):
+            for level in levels:
+                for intervention in STRATEGIES:
+                    cfg = ModelConfig(
+                        n=n,
+                        mean_degree=mean_degree,
+                        network_type=network_type,
+                        intervention=intervention,
+                        heterogeneity=level,
+                        fact_checker_fraction=(
+                            0.0 if intervention == "none"
+                            else 0.05
+                        ),
+                        max_steps=max_steps,
+                        # 不随策略或异质性水平改变。
+                        seed=1000 + rep,
+                    )
 
-    df = pd.DataFrame(rows)
+                    _, metrics, _ = run_simulation(cfg)
+                    metrics["repeat"] = rep
+                    rows.append(metrics)
 
-    # mode="x" prevents accidental overwrite of an existing experiment.
-    df.to_csv(output, index=False, mode="x")
+            print(
+                f"Completed {len(rows)}/{total}",
+                flush=True,
+            )
 
-    metadata = environment_record()
-    metadata["experiment"] = {
-        "n": n,
-        "repeats": repeats,
-        "mean_degree": mean_degree,
-        "max_steps": max_steps,
-        "networks": NETWORKS,
-        "interventions": INTERVENTIONS,
-        "heterogeneity_levels": LEVELS,
-        "total_runs": total,
-        "seed_start": 1000,
-        "seed_end": 1000 + total - 1,
-    }
+    return save_results(out_csv, rows)
 
-    with metadata_path.open("x", encoding="utf-8") as file:
-        json.dump(metadata, file, indent=2, ensure_ascii=False)
 
-    return df
+def run_budget_sweep(
+    out_csv,
+    n=500,
+    repeats=30,
+    network_type="scale_free",
+    heterogeneity="homogeneous",
+):
+    if repeats < 1:
+        raise ValueError("repeats must be positive")
+
+    check_output(out_csv)
+    rows = []
+
+    for rep in range(repeats):
+        for fraction in [0.01, 0.025, 0.05, 0.075, 0.10]:
+            for strategy in ["random", "centrality"]:
+                cfg = ModelConfig(
+                    n=n,
+                    network_type=network_type,
+                    intervention=strategy,
+                    heterogeneity=heterogeneity,
+                    fact_checker_fraction=fraction,
+                    seed=3000 + rep,
+                )
+
+                _, metrics, _ = run_simulation(cfg)
+                metrics["repeat"] = rep
+                rows.append(metrics)
+
+    return save_results(out_csv, rows)
 
 
 def run_budget_sweep(
@@ -249,73 +323,66 @@ def run_heterogeneity_smoke(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--experiment",
-        choices=["main", "budget", "smoke"],
+        choices=["main", "budget"],
         default="main",
     )
     parser.add_argument("--n", type=int, default=500)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--max-steps", type=int, default=150)
+
+    parser.add_argument(
+        "--heterogeneity",
+        choices=["all", *LEVELS],
+        default="all",
+    )
+
     parser.add_argument(
         "--output",
-        default="results/heterogeneity_experiment.csv",
+        default="../results/combined_experiment.csv",
     )
-    parser.add_argument(
-        "--mode",
-        choices=["homogeneous", "heterogeneous"],
-        default="homogeneous",
-        help="Explicit probability mode for budget/smoke experiments.",
-    )
-    parser.add_argument(
-        "--susceptibility-concentration",
-        type=float,
-        default=20.0,
-    )
-    parser.add_argument(
-        "--correction-concentration",
-        type=float,
-        default=20.0,
-    )
+
     args = parser.parse_args()
 
     if args.experiment == "main":
+        levels = (
+            LEVELS if args.heterogeneity == "all"
+            else [args.heterogeneity]
+        )
+
         df = run_factorial_experiment(
             args.output,
             n=args.n,
             repeats=args.repeats,
             max_steps=args.max_steps,
+            heterogeneity_levels=levels,
         )
-        grouped = df.groupby(
-            ["network_type", "heterogeneity", "intervention"]
-        )["final_reach"].agg(["mean", "std", "count"]).round(4)
 
-    elif args.experiment == "budget":
+    else:
+        if args.heterogeneity == "all":
+            parser.error(
+                "For budget experiments, choose one "
+                "--heterogeneity level."
+            )
+
         df = run_budget_sweep(
             args.output,
             n=args.n,
             repeats=args.repeats,
-            model_mode=args.mode,
-            susceptibility_concentration=args.susceptibility_concentration,
-            correction_concentration=args.correction_concentration,
+            heterogeneity=args.heterogeneity,
         )
-        grouped = df.groupby(
-            ["model_mode", "network_type", "intervention"]
-        )["final_reach"].agg(["mean", "std", "count"]).round(4)
 
-    else:
-        df = run_heterogeneity_smoke(
-            args.output,
-            n=args.n,
-            repeats=args.repeats,
-            susceptibility_concentration=args.susceptibility_concentration,
-            correction_concentration=args.correction_concentration,
-        )
-        grouped = df.groupby(
-            ["model_mode", "network_type", "intervention"]
-        )["final_reach"].agg(["mean", "std", "count"]).round(4)
-
-    print(grouped)
+    print(
+        df.groupby([
+            "network_type",
+            "heterogeneity",
+            "intervention",
+        ])["final_reach"].agg(
+            ["mean", "std", "count"]
+        ).round(4)
+    )
 
 
 if __name__ == "__main__":
