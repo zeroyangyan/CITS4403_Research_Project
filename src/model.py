@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional, Set, Tuple
+import random
 import hashlib
 import json
-import random
 
 import networkx as nx
 import numpy as np
@@ -14,16 +15,10 @@ BELIEVER = "Believer"
 CORRECTED = "Corrected"
 RESISTANT = "Resistant"
 
-ORDINARY_ROLE = "ordinary"
-FACT_CHECKER_ROLE = "fact_checker"
-RESISTANT_ROLE = "resistant"
-
 
 @dataclass
 class ModelConfig:
-    """All parameters needed for one reproducible simulation run."""
-
-    n: int = 500
+    n: int = 1000
     mean_degree: int = 8
     network_type: str = "small_world"
     ws_rewire_p: float = 0.10
@@ -34,93 +29,80 @@ class ModelConfig:
 
     intervention: str = "none"
     fact_checker_fraction: float = 0.05
-    initial_believers: int = 5
 
-    # Latest-main experiment interface.
-    # homogeneous | low | high
-    heterogeneity: str = "homogeneous"
 
-    # Feature-branch compatibility / explicit Beta mode.
-    # None: use `heterogeneity` above.
-    # homogeneous: force baseline probabilities.
-    # heterogeneous: sample Beta-distributed probabilities once per ordinary agent.
-    model_mode: Optional[str] = None
-    heterogeneity_distribution: str = "beta"
-    susceptibility_concentration: float = 20.0
-    correction_concentration: float = 20.0
+    initial_believers: int = 10
+    initial_believer_fraction: Optional[float] = 0.01# 默认使用实际节点数的1%。
+    # initial_believer_fraction=None 时才使用固定人数。
 
     corrected_share: bool = True
-    max_steps: int = 150
+    max_steps: int = 300
     seed: int = 1
+    heterogeneity: str = "homogeneous"
 
 
-HETEROGENEITY_STRENGTH = {
+STRENGTHS = {
     "homogeneous": 0.0,
     "low": 0.25,
     "high": 0.90,
 }
 
 
-def _validate_config(cfg):
+def _validate_config(cfg: ModelConfig) -> None:
+    if cfg.heterogeneity not in STRENGTHS:
+        raise ValueError("Unknown heterogeneity level")
+
+    if not 0 <= cfg.ws_rewire_p <= 1:
+        raise ValueError("ws_rewire_p must be in [0, 1]")
+
+    if cfg.intervention not in ("none", "random", "centrality"):
+        raise ValueError("Unknown intervention")
+
+    if cfg.max_steps < 1 or cfg.seed < 0:
+        raise ValueError("max_steps must be positive and seed nonnegative")
+
     if cfg.n < 10:
         raise ValueError("n must be at least 10")
 
-    if not 2 <= cfg.mean_degree < cfg.n:
+    if cfg.mean_degree < 2 or cfg.mean_degree >= cfg.n:
         raise ValueError("mean_degree must be between 2 and n-1")
 
-    if cfg.network_type not in (
-        "random", "small_world", "scale_free"
-    ):
-        raise ValueError("Unknown network type")
+    if not 0 <= cfg.misinformation_prob <= 1:
+        raise ValueError("misinformation_prob must be in [0, 1]")
 
-    if cfg.intervention not in (
-        "none", "random", "centrality"
-    ):
-        raise ValueError("Unknown intervention")
+    if not 0 <= cfg.correction_prob <= 1:
+        raise ValueError("correction_prob must be in [0, 1]")
 
-    if cfg.heterogeneity not in HETEROGENEITY_STRENGTH:
-        raise ValueError("Unknown heterogeneity level")
+    if not 0 <= cfg.resistant_fraction < 1:
+        raise ValueError("resistant_fraction must be in [0, 1)")
 
-    for name in (
-        "misinformation_prob",
-        "correction_prob",
-        "ws_rewire_p",
-    ):
-        if not 0 <= getattr(cfg, name) <= 1:
-            raise ValueError(f"{name} must be in [0, 1]")
+    if not 0 <= cfg.fact_checker_fraction < 1:
+        raise ValueError("fact_checker_fraction must be in [0, 1)")
 
-    for name in (
-        "resistant_fraction",
-        "fact_checker_fraction",
+    if (
+        cfg.initial_believer_fraction is not None
+        and not 0 < cfg.initial_believer_fraction < 1
     ):
-        if not 0 <= getattr(cfg, name) < 1:
-            raise ValueError(f"{name} must be in [0, 1)")
+        raise ValueError("initial_believer_fraction must be in (0, 1)")
 
     if cfg.initial_believers < 1:
-        raise ValueError("initial_believers must be positive")
-
-    if cfg.max_steps < 1 or cfg.seed < 0:
-        raise ValueError(
-            "max_steps must be positive and seed nonnegative"
-        )
+        raise ValueError("initial_believers must be >= 1")
 
 
-def resolve_seeds(cfg):
-    """
-    网络和属性种子不依赖策略。
-    核查者选择、初始化和状态转移使用各自独立随机流。
-    """
+def resolve_seeds(cfg: ModelConfig) -> dict:
     strategy_id = {
         "none": 0,
         "random": 1,
         "centrality": 2,
     }[cfg.intervention]
 
-    def derive(channel, strategy=0):
-        sequence = np.random.SeedSequence(
-            [cfg.seed, channel, strategy]
+    def derive(channel: int, strategy: int = 0) -> int:
+        return int(
+            np.random.SeedSequence(
+                [cfg.seed, channel, strategy]
+            ).generate_state(1)[0]
         )
-        return int(sequence.generate_state(1)[0])
+
 
     return {
         "network_seed": derive(0),
@@ -128,108 +110,15 @@ def resolve_seeds(cfg):
         "selection_seed": derive(2, strategy_id),
         "initialisation_seed": derive(3, strategy_id),
         "transition_seed": derive(4, strategy_id),
-    }
-
-
-def fingerprint(payload):
-    text = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(text.encode()).hexdigest()
-
-    if cfg.model_mode not in (None, "homogeneous", "heterogeneous"):
-        raise ValueError(
-            "model_mode must be None, 'homogeneous', or 'heterogeneous'"
-        )
-
-    if cfg.heterogeneity_distribution != "beta":
-        raise ValueError(
-            "heterogeneity_distribution currently supports only 'beta'"
-        )
-
-    if cfg.susceptibility_concentration <= 0:
-        raise ValueError("susceptibility_concentration must be > 0")
-
-    if cfg.correction_concentration <= 0:
-        raise ValueError("correction_concentration must be > 0")
-
-
-def graph_fingerprint(G):
-    return fingerprint({
-        "nodes": sorted(G.nodes()),
-        "edges": sorted(
-            (min(a, b), max(a, b))
-            for a, b in G.edges()
-        ),
-    })
-
-
-def generate_network(cfg):
-    _validate_config(cfg)
-    network_seed = resolve_seeds(cfg)["network_seed"]
-
-    if cfg.network_type == "random":
-        p = cfg.mean_degree / (cfg.n - 1)
-
-        # 保留原来的连通性处理方式。
-        for offset in range(20):
-            G = nx.erdos_renyi_graph(
-                cfg.n,
-                p,
-                seed=network_seed + offset,
-            )
-            if nx.is_connected(G):
-                return G
-
-        G = nx.erdos_renyi_graph(
-            cfg.n, p, seed=network_seed
-        )
-        largest = max(
-            nx.connected_components(G), key=len
-        )
-        G = G.subgraph(largest).copy()
-        return nx.convert_node_labels_to_integers(G)
-
-    if cfg.network_type == "small_world":
-        k = cfg.mean_degree
-        if k % 2:
-            k += 1
-
-        largest_even = cfg.n - 1
-        if largest_even % 2:
-            largest_even -= 1
-
-        k = min(k, largest_even)
-        return nx.watts_strogatz_graph(
-            cfg.n,
-            k,
-            cfg.ws_rewire_p,
-            seed=network_seed,
-        )
-
-    m = max(1, round(cfg.mean_degree / 2))
-    m = min(m, cfg.n - 1)
-
-    return nx.barabasi_albert_graph(
-        cfg.n, m, seed=network_seed
-    )
+    }# 角色选择、初始身份和状态转移使用策略各自的随机流。
 
 
 def make_probabilities(nodes, mean, level, rng):
-    """
-    分布规则：
-    d ~ Uniform(0, strength * min(mean, 1-mean))
-    成对生成 mean-d 和 mean+d，再随机分配给节点。
-    奇数个节点时，额外节点取 mean。
-
-    保证全体节点的实际平均值等于配置平均值，
-    并保证概率在 [0, 1] 内。
-
-    各节点属性在一次模拟中固定。
-    """
-    strength = HETEROGENEITY_STRENGTH[level]
-    width = strength * min(mean, 1.0 - mean)
+    width = STRENGTHS[level] * min(mean, 1.0 - mean)
 
     if width == 0:
         return {node: mean for node in nodes}
+
 
     values = []
 
@@ -247,7 +136,92 @@ def make_probabilities(nodes, mean, level, rng):
     return dict(zip(nodes, values))
 
 
-def select_fact_checkers(G, strategy, fraction, rng):
+def graph_fingerprint(G: nx.Graph) -> str:
+    payload = {
+        "nodes": sorted(G.nodes()),
+        "edges": sorted(
+            (min(a, b), max(a, b))
+            for a, b in G.edges()
+        ),
+    }
+
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def generate_network(cfg: ModelConfig) -> nx.Graph:
+    _validate_config(cfg)
+    network_seed = resolve_seeds(cfg)["network_seed"]
+
+    if cfg.network_type == "random":
+        edge_probability = cfg.mean_degree / (cfg.n - 1)
+        G = None
+
+
+        for offset in range(20):# 保留原模型的连通网络生成规则
+            candidate = nx.erdos_renyi_graph(
+                cfg.n,
+                edge_probability,
+                seed=network_seed + offset,
+            )
+
+            if nx.is_connected(candidate):
+                G = candidate
+                G.graph["realised_network_seed"] = network_seed + offset
+                break
+
+        if G is None:
+            candidate = nx.erdos_renyi_graph(
+                cfg.n,
+                edge_probability,
+                seed=network_seed,
+            )
+            largest_component = max(
+                nx.connected_components(candidate),
+                key=len,
+            )
+            G = candidate.subgraph(largest_component).copy()
+            G = nx.convert_node_labels_to_integers(G)
+            G.graph["realised_network_seed"] = network_seed
+
+    elif cfg.network_type == "small_world":
+        k = (
+            cfg.mean_degree
+            if cfg.mean_degree % 2 == 0
+            else cfg.mean_degree + 1
+        )
+        k = min(k, cfg.n - 1 - ((cfg.n - 1) % 2))
+
+        G = nx.watts_strogatz_graph(
+            cfg.n,
+            k,
+            cfg.ws_rewire_p,
+            seed=network_seed,
+        )
+
+    elif cfg.network_type == "scale_free":
+        m = max(1, round(cfg.mean_degree / 2))
+        m = min(m, cfg.n - 1)
+
+        G = nx.barabasi_albert_graph(
+            cfg.n,
+            m,
+            seed=network_seed,
+        )
+
+    else:
+        raise ValueError(f"Unknown network_type: {cfg.network_type}")
+
+    return G
+
+
+def select_fact_checkers(
+    G: nx.Graph,
+    strategy: str,
+    fraction: float,
+    rng: random.Random,
+) -> Set[int]:
     if strategy == "none" or fraction <= 0:
         return set()
 
@@ -255,55 +229,77 @@ def select_fact_checkers(G, strategy, fraction, rng):
     nodes = sorted(G.nodes())
 
     if strategy == "random":
-        return set(rng.sample(nodes, count))
+        return set(rng.sample(nodes, min(count, len(nodes))))
 
-    # centrality 在本项目中表示 degree-based selection。
-    ranked = sorted(
-        G.degree,
-        key=lambda item: (-item[1], item[0]),
-    )
+    if strategy == "centrality":
+        # 这里的centrality具体指度数定向选择。
+        ranked = sorted(
+            G.degree,
+            key=lambda item: (-item[1], item[0]),
+        )
+        return {node for node, _ in ranked[:count]}
 
-    return {node for node, degree in ranked[:count]}
+    raise ValueError(f"Unknown intervention strategy: {strategy}")
 
 
-def initialise_states(G, cfg, fact_checkers, rng):
-    """
-    核查者、抵抗者、初始相信者互不重叠。
-    初始状态按策略独立抽样，不保证节点身份相同。
-    """
+def _prob_at_least_one_success(
+    single_prob: float,
+    exposures: int,
+) -> float:
+    if exposures <= 0:
+        return 0.0
+
+    return 1.0 - (1.0 - single_prob) ** exposures
+
+
+def initialise_states(
+    G: nx.Graph,
+    cfg: ModelConfig,
+    fact_checkers: Set[int],
+    rng: random.Random,
+) -> Tuple[Dict[int, str], Set[int]]:
     states = {node: UNAWARE for node in G.nodes()}
 
     for node in fact_checkers:
         states[node] = CORRECTED
 
-    candidates = sorted(
-        set(G.nodes()) - fact_checkers
-    )
-    resistant_count = round(
-        len(G) * cfg.resistant_fraction
-    )
+    candidates = [
+        node
+        for node in sorted(G.nodes())
+        if node not in fact_checkers
+    ]
 
-    if (
-        resistant_count + cfg.initial_believers
-        > len(candidates)
-    ):
-        raise ValueError(
-            "Not enough eligible nodes for initial states"
-        )
-
+    resistant_count = round(len(G) * cfg.resistant_fraction)
     resistant_nodes = set(
-        rng.sample(candidates, resistant_count)
+        rng.sample(
+            candidates,
+            min(resistant_count, len(candidates)),
+        )
     )
 
     for node in resistant_nodes:
         states[node] = RESISTANT
 
-    eligible = sorted(
-        set(candidates) - resistant_nodes
-    )
-    initial = set(
-        rng.sample(eligible, cfg.initial_believers)
-    )
+    seed_candidates = [
+        node
+        for node in candidates
+        if states[node] == UNAWARE
+    ]
+
+    if cfg.initial_believer_fraction is not None:
+        initial_count = max(
+            1,
+            round(len(G) * cfg.initial_believer_fraction),
+        )
+    else:
+        initial_count = cfg.initial_believers
+
+    if len(seed_candidates) < initial_count:
+        raise ValueError(
+            "Not enough eligible nodes to place initial believers."
+        )
+
+    initial = set(rng.sample(seed_candidates, initial_count))
 
     for node in initial:
         states[node] = BELIEVER
@@ -311,35 +307,20 @@ def initialise_states(G, cfg, fact_checkers, rng):
     return states, initial
 
 
-def _prob_at_least_one_success(p, exposures):
-    if exposures <= 0:
-        return 0.0
-    return 1.0 - (1.0 - p) ** exposures
-
-    Two interfaces are retained so the feature branch and latest main can merge
-    without discarding either experiment design:
-
-def run_simulation(cfg):
-    _validate_config(cfg)
+def run_simulation(
+    cfg: ModelConfig,
+) -> Tuple[List[dict], dict, nx.Graph]:
     seeds = resolve_seeds(cfg)
 
-    attribute_rng = random.Random(
-        seeds["attribute_seed"]
-    )
-    selection_rng = random.Random(
-        seeds["selection_seed"]
-    )
-    initial_rng = random.Random(
-        seeds["initialisation_seed"]
-    )
-    transition_rng = random.Random(
-        seeds["transition_seed"]
-    )
+    selection_rng = random.Random(seeds["selection_seed"])
+    initial_rng = random.Random(seeds["initialisation_seed"])
+    transition_rng = random.Random(seeds["transition_seed"])
 
     G = generate_network(cfg)
+    nodes = sorted(G.nodes())
 
-    # 先为所有节点分配潜在属性，避免策略改变属性分配。
-    # 核查者与抵抗者仍遵守原来的保护规则。
+    attribute_rng = random.Random(seeds["attribute_seed"])
+
     adoption = make_probabilities(
         nodes,
         cfg.misinformation_prob,
@@ -360,51 +341,43 @@ def run_simulation(cfg):
         selection_rng,
     )
 
-    (
-        _adoption,
-        _correction,
-        effective_mode,
-        effective_distribution,
-    ) = initialise_agent_attributes(
+    states, initial_believers = initialise_states(
         G,
         cfg,
         fact_checkers,
-        states,
-        behaviour_rng,
-        beta_rng,
+        initial_rng,
     )
 
     resistant_nodes = {
-        node for node, state in states.items()
+        node
+        for node, state in states.items()
         if state == RESISTANT
     }
 
-    ordinary_nodes = sorted(
+    ordinary = sorted(
         set(nodes) - fact_checkers - resistant_nodes
     )
 
-    ever_believed = set(initial)
-    history: List[dict] = []
+    ever_believed = set(initial_believers)
+    history = []
 
     def record(step):
+        counts = {
+            UNAWARE: 0,
+            BELIEVER: 0,
+            CORRECTED: 0,
+            RESISTANT: 0,
+        }
+
+        for state in states.values():
+            counts[state] += 1
+
         history.append({
             "step": step,
-            "unaware": sum(
-                state == UNAWARE
-                for state in states.values()
-            ),
-            "believer": sum(
-                state == BELIEVER
-                for state in states.values()
-            ),
-            "corrected": sum(
-                state == CORRECTED
-                for state in states.values()
-            ),
-            "resistant": sum(
-                state == RESISTANT
-                for state in states.values()
-            ),
+            "unaware": counts[UNAWARE],
+            "believer": counts[BELIEVER],
+            "corrected": counts[CORRECTED],
+            "resistant": counts[RESISTANT],
             "ever_believed": len(ever_believed),
         })
 
@@ -420,28 +393,17 @@ def run_simulation(cfg):
         if not believers:
             break
 
-        misinformation_exposures: Dict[int, int] = {}
-        correction_exposures: Dict[int, int] = {}
+        misinformation_exposures = {}
+        correction_exposures = {}
 
-        # Preserve deterministic iteration in latest-main mode. In explicit
-        # feature mode, insertion order is already stable for integer node IDs.
-        source_nodes = (
-            believers
-            if cfg.model_mode is not None
-            else sorted(believers)
-        )
-        for source in source_nodes:
-            neighbours = (
-                G.neighbors(source)
-                if cfg.model_mode is not None
-                else sorted(G.neighbors(source))
-            )
-            for neighbour in neighbours:
-                if states[neighbour] == UNAWARE:
+        for source in sorted(believers):
+            for neighbour in sorted(G.neighbors(source)):
+                if (
+                    states[neighbour] == UNAWARE
+                    and neighbour not in fact_checkers
+                ):
                     misinformation_exposures[neighbour] = (
-                        misinformation_exposures.get(
-                            neighbour, 0
-                        ) + 1
+                        misinformation_exposures.get(neighbour, 0) + 1
                     )
 
         correction_sources = set(fact_checkers)
@@ -453,131 +415,104 @@ def run_simulation(cfg):
                 if state == CORRECTED
             )
 
-        correction_source_nodes = (
-            correction_sources
-            if cfg.model_mode is not None
-            else sorted(correction_sources)
-        )
-        for source in correction_source_nodes:
-            neighbours = (
-                G.neighbors(source)
-                if cfg.model_mode is not None
-                else sorted(G.neighbors(source))
-            )
-            for neighbour in neighbours:
+        for source in sorted(correction_sources):
+            for neighbour in sorted(G.neighbors(source)):
                 if states[neighbour] == BELIEVER:
                     correction_exposures[neighbour] = (
-                        correction_exposures.get(
-                            neighbour, 0
-                        ) + 1
+                        correction_exposures.get(neighbour, 0) + 1
                     )
 
-        to_believer: Set[int] = set()
-        to_corrected: Set[int] = set()
+        to_believer = set()
+        to_corrected = set()
 
-        for node, exposures in sorted(
-            misinformation_exposures.items()
-        ):
-            # 使用接收用户的相信概率。
-            p = _prob_at_least_one_success(
-                adoption[node], exposures
+        for node, exposures in sorted(misinformation_exposures.items()):
+            probability = _prob_at_least_one_success(
+                adoption[node],
+                exposures,
             )
-            if transition_rng.random() < p:
+
+            if transition_rng.random() < probability:
                 to_believer.add(node)
 
-        for node, exposures in sorted(
-            correction_exposures.items()
-        ):
-            # 使用接收用户的接受纠正概率。
-            p = _prob_at_least_one_success(
-                correction[node], exposures
+        for node, exposures in sorted(correction_exposures.items()):
+            probability = _prob_at_least_one_success(
+                correction[node],
+                exposures,
             )
-            if transition_rng.random() < p:
+
+            if transition_rng.random() < probability:
                 to_corrected.add(node)
 
-        # 同步更新；新相信者从下一步开始传播。
+        # 同步更新，新相信者从下一步才开始传播。
         for node in to_believer:
-            states[node] = BELIEVER
-            ever_believed.add(node)
+            if states[node] == UNAWARE:
+                states[node] = BELIEVER
+                ever_believed.add(node)
 
         for node in to_corrected:
-            states[node] = CORRECTED
+            if states[node] == BELIEVER:
+                states[node] = CORRECTED
 
         record(step)
 
-    believer_series = [
-        row["believer"] for row in history
-    ]
-    peak = max(believer_series)
-    peak_index = believer_series.index(peak)
-    active_at_end = believer_series[-1] > 0
+    believer_series = [row["believer"] for row in history]
+    peak_believers = max(believer_series)
+    time_to_peak = believer_series.index(peak_believers)
 
-    for node in G.nodes():
-        G.nodes[node]["final_state"] = states[node]
+    extinction_time = None
 
-    ordinary_summary = _ordinary_attribute_summary(G)
-    ordinary_nodes = [
-        node
-        for node in G.nodes()
-        if G.nodes[node]["agent_role"] == ORDINARY_ROLE
-    ]
+    if believer_series[-1] == 0:
+        extinction_time = history[-1]["step"]
 
     metrics = {
         **asdict(cfg),
         **seeds,
-        "initialisation_protocol":
-            "independent_eligible_sampling_v1",
-        "heterogeneity_distribution":
-            "paired_symmetric_uniform",
-        "heterogeneity_strength":
-            HETEROGENEITY_STRENGTH[cfg.heterogeneity],
-        "graph_sha256": graph_fingerprint(G),
-        "attribute_sha256": fingerprint([
-            [node, adoption[node], correction[node]]
-            for node in nodes
-        ]),
-        "actual_n": len(G),
-        "actual_mean_degree":
-            2 * G.number_of_edges() / len(G),
-        "num_fact_checkers": len(fact_checkers),
-        "fact_checker_nodes":
-            json.dumps(sorted(fact_checkers)),
-        "resistant_nodes":
-            json.dumps(sorted(resistant_nodes)),
-        "initial_believer_nodes":
-            json.dumps(sorted(initial)),
-        "adoption_mean": float(np.mean([
-            adoption[node] for node in nodes
-        ])),
-        "adoption_std": float(np.std([
-            adoption[node] for node in nodes
-        ])),
-        "correction_mean": float(np.mean([
-            correction[node] for node in nodes
-        ])),
-        "correction_std": float(np.std([
-            correction[node] for node in nodes
-        ])),
-        # 普通用户子集的均值可能因角色选择略有变化，
-        # 所以额外记录，方便检查策略间的属性构成。
-        "ordinary_adoption_mean": float(np.mean([
-            adoption[node] for node in ordinary_nodes
-        ])),
-        "ordinary_correction_mean": float(np.mean([
-            correction[node] for node in ordinary_nodes
-        ])),
-        "final_reach": len(ever_believed) / len(G),
-        "peak_believers": peak,
-        "peak_believer_fraction": peak / len(G),
-        "time_to_peak": history[peak_index]["step"],
-        "final_believers": believer_series[-1],
-        "ended_with_active_believers": active_at_end,
-        "extinction_time": (
-            None if active_at_end
-            else history[-1]["step"]
+        "heterogeneity_strength": STRENGTHS[cfg.heterogeneity],
+        "attribute_distribution": "paired_symmetric_uniform",
+        "adoption_mean": float(np.mean(list(adoption.values()))),
+        "adoption_std": float(np.std(list(adoption.values()))),
+        "correction_mean": float(np.mean(list(correction.values()))),
+        "correction_std": float(np.std(list(correction.values()))),
+        "ordinary_adoption_mean": float(
+            np.mean([adoption[node] for node in ordinary])
         ),
+        "ordinary_correction_mean": float(
+            np.mean([correction[node] for node in ordinary])
+        ),
+        "initialisation_protocol": "independent_eligible_sampling_v1",
+        "graph_sha256": graph_fingerprint(G),
+        "fact_checker_nodes": json.dumps(sorted(fact_checkers)),
+        "resistant_nodes": json.dumps(sorted(resistant_nodes)),
+        "initial_believer_nodes": json.dumps(sorted(initial_believers)),
+        "attribute_sha256": hashlib.sha256(
+            json.dumps([
+                [node, adoption[node], correction[node]]
+                for node in nodes
+            ]).encode()
+        ).hexdigest(),
+        "realised_network_seed": G.graph.get(
+            "realised_network_seed",
+            seeds["network_seed"],
+        ),
+        "actual_n": len(G),
+        "actual_mean_degree": (
+            sum(dict(G.degree()).values()) / len(G)
+        ),
+        "num_fact_checkers": len(fact_checkers),
+        "num_initial_believers": len(initial_believers),
+        "actual_initial_believer_fraction": (
+            len(initial_believers) / len(G)
+        ),
+        "final_reach": len(ever_believed) / len(G),
+        "peak_believers": peak_believers,
+        "peak_believer_fraction": peak_believers / len(G),
+        "time_to_peak": time_to_peak,
+        "extinction_time": extinction_time,
+        "ended_with_active_believers": believer_series[-1] > 0,
+        "final_believers": believer_series[-1],
         "stop_reason": (
-            "time_limit" if active_at_end
+            "time_limit"
+            if believer_series[-1] > 0
             else "extinction"
         ),
     }
