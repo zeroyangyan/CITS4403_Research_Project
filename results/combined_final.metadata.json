@@ -1,0 +1,38 @@
+{
+  "command": [
+    "experiments.py",
+    "--n",
+    "500",
+    "--repeats",
+    "30",
+    "--output",
+    "../results/combined_final.csv"
+  ],
+  "python": "3.13.14 (v3.13.14:fd17997c386, Jun 10 2026, 08:55:00) [Clang 21.0.0 (clang-2100.1.1.101)]",
+  "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+  "versions": {
+    "networkx": "3.6.1",
+    "numpy": "2.5.3",
+    "pandas": "3.0.6"
+  },
+  "source_commit": null,
+  "git_dirty": null,
+  "source_sha256": {
+    "checkpoint2_demo.py": "923390c0a94e48c6d0bfb652cef11e3ad021cff3ba266eefeecc12830c681f16",
+    "experiments.py": "bc3a7a8464d2338db6a7ba93ad065761f40b71f9461fa9461a655ae6f2129887",
+    "model.py": "36a709cc76f3d02c8d2b11159ea22cb42ee552c41114d4ef865ef74cb506cd74",
+    "plots.py": "f4521e7bad44d70b50d0176701c9d407a04c2f86783c63ba75f1c64c55cdd844"
+  },
+  "initialisation_protocol": "independent_eligible_sampling_v1",
+  "runs": 810,
+  "heterogeneity": {
+    "distribution": "paired_symmetric_uniform",
+    "strengths": {
+      "homogeneous": 0.0,
+      "low": 0.25,
+      "high": 0.9
+    },
+    "note": "Attributes are sampled once and remain fixed. Whole-population means match configured means. These distributions are modelling assumptions."
+  },
+  "comparison_note": "Strategies share networks and latent attributes. Initial states are independently sampled from eligible nodes. Runs across strategies are grouped by network replicate, not independent graph samples."
+}
